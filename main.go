@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"log"
+	"sort"
 	"strings"
 
 	"code.cloudfoundry.org/cli/plugin"
@@ -26,9 +27,19 @@ func getPossibleDomains(hostname string) []string {
 func (c *BasicPlugin) Run(cliConnection plugin.CliConnection, args []string) {
 	log.SetFlags(0)
 
+	if len(args) == 1 && args[0] == "CLI-MESSAGE-UNINSTALL" {
+		log.Println("Lack of features? Please contribute: https://github.com/18F/cf-route-lookup/")
+		return
+	}
+
+	if len(args) >= 1 && args[0] != CMD {
+		log.Println("Type --help...")
+		return
+	}
+
 	flags := flag.NewFlagSet(CMD, flag.ContinueOnError)
 	target := flags.Bool("t", false, "Target the org / space containing this route")
-	flags.Parse(args[1:])
+	_ = flags.Parse(args[1:])
 
 	if len(flags.Args()) != 1 {
 		log.Fatal("Please specify the domain to look up.")
@@ -36,45 +47,61 @@ func (c *BasicPlugin) Run(cliConnection plugin.CliConnection, args []string) {
 
 	hostname := flags.Args()[0]
 
-	apps, err := getApps(cliConnection, hostname)
+	appsExt, err := getApps(cliConnection, hostname)
 	if err != nil {
 		log.Fatal("Error retrieving apps: ", err)
 	}
 
-	if len(apps) == 0 {
+	if len(appsExt) == 0 {
 		log.Println("Not bound to any applications.")
 		return
 	}
 	log.Println("Bound to:")
 
-	for _, app := range apps {
-		space, err := app.GetSpace(cliConnection)
-		if err != nil {
-			log.Fatal("Error retrieving space: ", err)
+	var firstApp App
+	found := false
+
+	sort.Slice(appsExt, func(i, j int) bool {
+		return appsExt[i].route.route.SpaceGUID < appsExt[j].route.route.SpaceGUID
+	})
+
+	targets := NewTargets()
+	spaceGuid := ""
+	for _, appExt := range appsExt {
+		if appExt.app != (App{}) {
+			if !found {
+				firstApp = appExt.app
+				found = true
+			}
 		}
-		org, err := space.GetOrg(cliConnection)
-		if err != nil {
-			log.Fatal("Error retrieving org: ", err)
+
+		if spaceGuid != appExt.route.route.SpaceGUID {
+			spaceGuid = appExt.route.route.SpaceGUID
+			org, space, err := targets.GetTargetBySpaceGuid(cliConnection, spaceGuid)
+			if err != nil {
+				log.Println("Cannot find the space with GUID=" + spaceGuid)
+				return
+			}
+			log.Printf("\n> cf target -o %v -s %v\n", org.Entity.Name, space.Entity.Name)
 		}
-		log.Println(org.Entity.Name + "/" + space.Entity.Name + "/" + app.Entity.Name)
+
+		if appExt.app == (App{}) {
+			log.Printf("  > # unbounded route: %v (%v)\n", appExt.route.hostname, appExt.route.route.GUID)
+		} else {
+			log.Printf("  > cf app %v  # route: %v (%v)\n", appExt.app.Entity.Name, appExt.route.hostname, appExt.route.route.GUID)
+		}
 	}
 
 	if *target {
-		_, err = apps[0].Target(cliConnection)
+		firstAppOrg, firstAppSpace, err := targets.GetTargetBySpaceGuid(cliConnection, firstApp.Entity.SpaceGUID)
+		if err != nil {
+			log.Fatal("Error retrieving target: ", err)
+		}
+		log.Printf("\nChanging target to: %v ...", firstAppOrg.Entity.Name+" / "+firstAppSpace.Entity.Name)
+		_, err = cliConnection.CliCommand("target", "-o", firstAppOrg.Entity.Name, "-s", firstAppSpace.Entity.Name)
 		if err != nil {
 			log.Fatal("Error targeting app: ", err)
 		}
-
-		space, err := apps[0].GetSpace(cliConnection)
-		if err != nil {
-			log.Fatal("Error retrieving space: ", err)
-		}
-		org, err := space.GetOrg(cliConnection)
-		if err != nil {
-			log.Fatal("Error retrieving org: ", err)
-		}
-
-		log.Println("Changed target to:", org.Entity.Name + "/" + space.Entity.Name)
 	}
 
 }
@@ -95,11 +122,14 @@ func (c *BasicPlugin) GetMetadata() plugin.PluginMetadata {
 		Commands: []plugin.Command{
 			{
 				Name:     CMD,
-				HelpText: "Look up the mapping of a provided route",
+				HelpText: "Look up the mapping of a provided route." +
+					"\n   Wildcard support: '*' - any number of any characters with the exception of dots",
 				UsageDetails: plugin.Usage{
-					Usage: "\n   cf " + CMD + " [-t] <some.domain.com>",
+					Usage: "\ncf " + CMD + " [-t] some.example.com" +
+						"\ncf " + CMD + " [-t] *.example.com" +
+						"\ncf " + CMD + " [-t] *s*me*.example.com",
 					Options: map[string]string{
-						"t": "Target the org / space containing the route",
+						"t": "Target the first org / space matching the route",
 					},
 				},
 			},

@@ -18,6 +18,10 @@ $ cf lookup-route <my.example.com>
 Bound to:
 <org>/<space>/<app>
 
+$ cf lookup-route <*.example.com>
+Bound to:
+<org>/<space>/<app>
+
 # use -t to target the org/space containing the route
 $ cf lookup-route -t <my.example.com>
 Bound to:
